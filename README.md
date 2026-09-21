@@ -1,80 +1,84 @@
-# NFL Data Pipeline
+# sports-data-pipeline
 
-A scheduled data pipeline that ingests NFL game results every morning and lands them as immutable Parquet files. The next stages, a DuckDB warehouse with incremental loading and automated quality checks, are planned.
+Pulls NFL scores from ESPN every morning, saves each day's games as a Parquet file, and will eventually load them into a DuckDB warehouse with data quality checks on top. It's NFL only for now, but the code is split up so another sport can be added as its own module later.
 
-**Status:** ingestion built | daily schedule going live | warehouse and quality checks planned
+The daily job has been live since September 21, 2026. Every game day shows up in the commit history as a commit from `github-actions[bot]`.
 
----
+**Status:** ingestion is running daily. The warehouse and quality checks are next.
 
-## Why this exists
+## Why I built it
 
-Most portfolio pipelines run once against a static CSV. This one runs on a schedule against a live API, which means it has to handle the things real pipelines handle: reruns, missing days, upstream schema changes, and games that are still in progress when the job fires.
+A lot of portfolio pipelines load one CSV one time and stop there. I wanted something that runs on its own against a live API, because that's where the harder problems show up. What happens if the job runs twice? What if a game is still going when it fires? What if ESPN changes the response? This project is me working through those.
 
 ## How it works
 
 ```
-ESPN Scoreboard API
-        |
-        v
-   ingest job          (GitHub Actions, daily 12:00 UTC)
-        |
-        v
-   data/raw/nfl/       (Parquet, one file per date, never modified)
-        |
-        v
-   DuckDB warehouse    (planned: incremental load, deduplicated on event_id)
-        |
-        v
-   quality checks      (planned: job fails if any check fails)
+ESPN scoreboard API
+      |
+      v
+ingest job                          GitHub Actions, daily at 12:00 UTC (7am Central)
+      |
+      v
+data/raw/nfl/YYYY-MM-DD.parquet     one file per day, never edited
+      |
+      v
+DuckDB warehouse                    not built yet
+      |
+      v
+quality checks                      not built yet
 ```
 
-The job runs at 12:00 UTC, which is 7:00am Central, and pulls the previous day's slate. Raw files are written once and never edited, so the warehouse can always be rebuilt from scratch.
+Each morning the job grabs the previous day's games. On days with no games, which is most weekdays, it doesn't write anything. On game days it writes one Parquet file for that date and commits it back to the repo.
+
+Raw files never get overwritten. If I break a transform later, I can rebuild everything downstream from these files instead of re-pulling months of data from the API.
 
 ## Data source
 
-ESPN's public scoreboard endpoint. No API key, no authentication, no rate limit issues at one request per day.
+ESPN's public scoreboard endpoint. No API key or login, and one request a day is nowhere near any limit.
 
 ```
 GET https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=YYYYMMDD
 ```
 
-## Schema
+It's not an official, documented API, so the response could change without notice. That's part of why schema drift handling is on the roadmap.
+
+## What gets stored
+
+One row per game:
 
 | Column | Type | Notes |
 |---|---|---|
-| `event_id` | string | Primary key, stable across reruns |
-| `event_date` | timestamp | Kickoff, UTC |
-| `status` | string | `STATUS_FINAL`, `STATUS_POSTPONED`, `STATUS_CANCELED` |
-| `home_team` | string | Full display name |
-| `away_team` | string | Full display name |
+| `event_id` | string | ESPN's game ID, used as the primary key |
+| `event_date` | timestamp | Kickoff time in UTC |
+| `status` | string | `STATUS_FINAL`, `STATUS_POSTPONED`, or `STATUS_CANCELED` |
+| `home_team` | string | Full team name |
+| `away_team` | string | Full team name |
 | `home_score` | integer | Null if the game never started |
 | `away_score` | integer | Null if the game never started |
 | `venue` | string | Stadium name |
 
-## Planned data quality checks
+## Decisions and tradeoffs
 
-| Check | Rule | On failure |
+**Parquet instead of CSV.** CSV doesn't keep types, so a missing score turns into an empty string and breaks any math on that column. Parquet keeps nulls as nulls, and the files stay small even with a new one every game day.
+
+**Unfinished days don't get written.** If any game from that date is still scheduled or in progress, the job writes nothing and fails on purpose. Since raw files are never edited, saving a half-finished day would lock in the wrong scores permanently.
+
+**Dates use Eastern time.** ESPN groups games by the Eastern calendar day, so the pipeline does too. A Sunday night game that kicks off at 8:20pm ET goes in Sunday's file, even though its UTC `event_date` says Monday.
+
+**Reruns are safe.** If a file for that date already exists, the job skips it. Running it twice gives the same result as running it once, so a retry can't create duplicate data.
+
+**DuckDB for the warehouse (planned).** There's no server to run and no credentials to set up in GitHub Actions, and the whole database is one file. The SQL is close enough to Postgres that switching later wouldn't mean a rewrite.
+
+## Planned quality checks
+
+| Check | Rule | If it fails |
 |---|---|---|
 | Uniqueness | One row per `event_id` | Job fails |
-| Not null | `event_id`, `event_date`, both team names | Job fails |
+| Not null | `event_id`, `event_date`, and both team names | Job fails |
 | Freshness | Last successful run within 36 hours | Job fails |
-| Range | Scores between 0 and 100 | Warning |
+| Range | Scores between 0 and 100 | Warning only |
 
-Freshness is measured from the last successful run, not the newest game date. Most days have no NFL games, so a game-date check would fail every Tuesday and Wednesday.
-
-## Design decisions
-
-**Parquet for the raw layer, not CSV.** Parquet preserves types, so a null score stays null instead of becoming an empty string that breaks arithmetic later. It also compresses well, which matters when the repo accumulates a file per day.
-
-**Immutable raw files.** The ingest job never rewrites a file that already exists. If a transform has a bug, the fix is to rerun the transform, not to re-pull months of data from an API that may have changed.
-
-**Only settled days are written.** If any game for the date is still scheduled or in progress, the job writes nothing and exits with an error. Freezing a half-finished day into an immutable file would lock in wrong scores.
-
-**Dates follow the US Eastern calendar.** ESPN groups games by Eastern date, so `--date` does too. A Sunday night kickoff at 8:20pm ET belongs to Sunday's file even though its UTC `event_date` falls on Monday.
-
-**DuckDB over Postgres.** No server to run, no credentials to manage in CI, and the entire warehouse is a single file. The SQL is standard enough that moving to Postgres later is a configuration change rather than a rewrite.
-
-**Idempotent by design.** Running the job twice for the same date produces the same result. This is the property that makes a pipeline safe to retry, and it is the first thing that breaks in naive implementations.
+Freshness is based on the last successful run, not the newest game date. Most Tuesdays and Wednesdays have no games, so a game-date check would fail every week.
 
 ## Running it locally
 
@@ -86,37 +90,37 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Ingest yesterday's games
+# yesterday's games
 python src/pipeline.py
 
-# Ingest a specific date
+# a specific date
 python src/pipeline.py --date 2026-09-14
 ```
 
-## Repository layout
+## Repo layout
 
 ```
 sports-data-pipeline/
-├── .github/workflows/daily.yml   Scheduled ingest job
+├── .github/workflows/daily.yml   the scheduled job
 ├── src/
-│   ├── sources/nfl.py            API client and flattening logic
-│   └── pipeline.py               Orchestration entry point
-├── data/raw/nfl/                 Immutable Parquet landing zone
+│   ├── sources/nfl.py            ESPN client, turns the JSON into rows
+│   └── pipeline.py               entry point, decides what gets written
+├── data/raw/nfl/                 one Parquet file per game day
 ├── requirements.txt
 └── README.md
 ```
 
 ## Roadmap
 
-- [x] Ingestion script with immutable Parquet output
-- [x] Source abstraction so a second sport can be added without refactoring
-- [ ] Daily scheduled ingestion via GitHub Actions
+- [x] Ingestion script with Parquet output
+- [x] Separate source module so a second sport can be added without refactoring
+- [x] Daily scheduled run with GitHub Actions
 - [ ] DuckDB warehouse with incremental loading
-- [ ] Watermark tracking so only new dates are pulled
-- [ ] Automated data quality checks that fail the build
-- [ ] Backfill script for historical seasons
-- [ ] Streamlit dashboard with live deployment
-- [ ] Schema drift handling when the upstream API adds fields
+- [ ] Watermark tracking so only new dates get loaded
+- [ ] Data quality checks that fail the job
+- [ ] Backfill script for past seasons
+- [ ] Streamlit dashboard
+- [ ] Handling for new or changed fields in the ESPN response
 
 ## License
 
