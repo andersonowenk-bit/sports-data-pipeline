@@ -15,7 +15,6 @@ import requests
 SPORT = "nfl"
 URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 
-# Statuses that will never change again, so the day is safe to write.
 SETTLED_STATUSES = {"STATUS_FINAL", "STATUS_POSTPONED", "STATUS_CANCELED"}
 
 
@@ -29,7 +28,7 @@ def fetch_scoreboard(game_date: date) -> dict:
         params={"dates": game_date.strftime("%Y%m%d")},
         timeout=30,
     )
-    response.raise_for_status()  # a 4xx/5xx stops the job instead of writing bad data
+    response.raise_for_status() 
     return response.json()
 
 
@@ -48,12 +47,9 @@ def flatten(payload: dict) -> list[dict]:
         competition = event["competitions"][0]
         status = event["status"]["type"]["name"]
 
-        # Competitors come as a list; pick them out by home/away, not position.
         teams = {c["homeAway"]: c for c in competition["competitors"]}
         home, away = teams["home"], teams["away"]
 
-        # ESPN reports 0-0 for games that haven't kicked off. Store null instead,
-        # so "no score yet" can't be confused with an actual 0-0 game.
         started = status != "STATUS_SCHEDULED"
 
         rows.append(
