@@ -31,7 +31,7 @@ def to_dataframe(rows: list[dict]) -> pd.DataFrame:
     """Build the DataFrame with explicit types so Parquet stores them correctly."""
     df = pd.DataFrame(rows)
     df["event_date"] = pd.to_datetime(df["event_date"], utc=True)
-    # "Int64" (capital I) is pandas' integer type that allows nulls.
+
     df["home_score"] = df["home_score"].astype("Int64")
     df["away_score"] = df["away_score"].astype("Int64")
     for col in ["event_id", "status", "home_team", "away_team", "venue"]:
@@ -42,8 +42,7 @@ def to_dataframe(rows: list[dict]) -> pd.DataFrame:
 def run(game_date: date) -> int:
     out_path = RAW_DIR / f"{game_date.isoformat()}.parquet"
 
-    # Immutability: never overwrite a file that already exists.
-    # This is also what makes the job safe to run twice.
+
     if out_path.exists():
         print(f"{out_path.name} already exists, skipping.")
         return 0
@@ -54,7 +53,7 @@ def run(game_date: date) -> int:
         print(f"No NFL games on {game_date}. Nothing to write.")
         return 0
 
-    # Don't freeze a half-finished day into an immutable file.
+
     unsettled = [r for r in rows if r["status"] not in nfl.SETTLED_STATUSES]
     if unsettled:
         print(
