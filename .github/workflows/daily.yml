@@ -1,0 +1,33 @@
+name: Daily NFL ingest
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC = 7:00am Central
+  workflow_dispatch:        # adds a "Run workflow" button for manual runs
+
+permissions:
+  contents: write           # required so the job can push the new data file
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest yesterday's games
+        run: python src/pipeline.py
+
+      - name: Commit new data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add data/raw/nfl/
+          git diff --cached --quiet || git commit -m "data: ingest $(date -u -d yesterday +%F)"
+          git push
